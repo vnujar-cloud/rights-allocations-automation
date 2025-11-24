@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Right Issues Allocation (Excel upload)</title>
+
+  <!-- SheetJS for reading Excel in browser -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 20px;
+      background: #f4f4f4;
+    }
+    h1 { font-size: 20px; margin-bottom: 10px; }
+    .card {
+      background: #fff;
+      padding: 15px;
+      border-radius: 8px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+      margin-bottom: 15px;
+      max-width: 1200px;
+    }
+    label { font-size: 14px; margin-right: 10px; }
+    input[type="number"], input[type="file"] {
+      padding: 4px 6px;
+      font-size: 13px;
+    }
+    input[type="number"] { width: 140px; }
+    button {
+      padding: 6px 10px;
+      margin: 5px 0;
+      border-radius: 4px;
+      border: 1px solid #0074d9;
+      background: #0074d9;
+      color: white;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: #fff;
+      color: #0074d9;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 13px;
+    }
+    th, td {
+      border: 1px solid #ccc;
+      padding: 4px 6px;
+      text-align: right;
+    }
+    th { background: #eee; }
+    td input {
+      width: 100%;
+      box-sizing: border-box;
+      border: none;
+      text-align: right;
+      background: transparent;
+    }
+    tfoot td {
+      font-weight: 600;
+      background: #fafafa;
+    }
+    .summary {
+      font-size: 13px;
+      margin-top: 6px;
+    }
+    .summary span {
+      display: inline-block;
+      margin-right: 20px;
+    }
+    .muted { font-size: 12px; color: #555; }
+  </style>
+</head>
+<body>
+
+<div class="card">
+  <h1>Right Issues Allocation (Excel Upload)</h1>
+
+  <div style="margin-bottom:8px;">
+    <label>
+      Total Right Issue Shares:
+      <input id="rightsTotal" type="number" value="100000" />
+    </label>
+  </div>
+
+  <div style="margin-bottom:8px;">
+    <label>
+      Excel file:
+      <input id="fileInput" type="file" accept=".xlsx,.xls" />
+    </label>
+    <button class="secondary" onclick="loadFromFile()">Load Excel</button>
+    <button onclick="calculate()">Calculate Allocation</button>
+  </div>
+
+  <div class="muted">
+    Excel first sheet should have headers like: <b>CDS REF</b>, <b>Sh.count</b>, <b>Request</b> in row 1.  
+    All rows below will be used for allocation.
+  </div>
+</div>
+
+<div class="card">
+  <h2 style="font-size:16px;margin-top:0;">Input – Shareholders (from file)</h2>
+  <table>
+    <thead>
+    <tr>
+      <th style="text-align:center;">No</th>
+      <th style="text-align:left;">CDS REF</th>
+      <th>Share count</th>
+      <th>Requested</th>
+    </tr>
+    </thead>
+    <tbody id="holder-rows">
+      <!-- filled from Excel -->
+    </tbody>
+  </table>
+  <div class="summary" id="inputSummary"></div>
+</div>
+
+<div class="card">
+  <h2 style="font-size:16px;margin-top:0;">Output – Allocation</h2>
+  <table>
+    <thead>
+    <tr>
+      <th style="text-align:center;">No</th>
+      <th style="text-align:left;">CDS REF</th>
+      <th>Share count</th>
+      <th>Requested</th>
+      <th>Ratio %</th>
+      <th>Theoretical limit<br>(by ratio)</th>
+      <th>Allocated</th>
+      <th>Request balance</th>
+    </tr>
+    </thead>
+    <tbody id="result-rows"></tbody>
+    <tfoot>
+      <tr>
+        <td colspan="2">Totals</td>
+        <td id="totShares"></td>
+        <td id="totRequested"></td>
+        <td></td>
+        <td id="totLimit"></td>
+        <td id="totAllocated"></td>
+        <td></td>
+      </tr>
+    </tfoot>
+  </table>
+  <div class="summary" id="outputSummary"></div>
+</div>
+
+<script>
+  // ========== Excel loader ==========
+  function loadFromFile() {
+    const fileInput = document.getElementById('fileInput');
+    const file = fileInput.files[0];
+    if (!file) {
+      alert('Please choose an Excel file first.');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = function (e) {
+      const data = new Uint8Array(e.target.result);
+      const wb = XLSX.read(data, { type: 'array' });
+      const sheetName = wb.SheetNames[0];
+      const ws = wb.Sheets[sheetName];
+
+      // data as [ [header1, header2, ...], [row1col1,...], ...]
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+
+      if (!rows || rows.length < 2) {
+        alert('Sheet is empty or has no data.');
+        return;
+      }
+
+      // Assume:
+      // col0 = CDS REF, col1 = Sh.count, col2 = Request
+      const body = document.getElementById('holder-rows');
+      body.innerHTML = '';
+
+      let totalShares = 0;
+      let totalReq = 0;
+
+      for (let i = 1; i < rows.length; i++) {
+        const r = rows[i];
+        if (!r || (r[0] == null && r[1] == null && r[2] == null)) continue;
+
+        const ref = r[0] != null ? String(r[0]) : '';
+        const shares = Number(r[1] || 0);
+        const request = Number(r[2] || 0);
+
+        if (shares <= 0 && request <= 0) continue;
+
+        totalShares += shares;
+        totalReq += request;
+
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td style="text-align:center;">${i}</td>
+          <td style="text-align:left;">${ref}</td>
+          <td>${shares}</td>
+          <td>${request}</td>
+        `;
+        body.appendChild(tr);
+      }
+
+      document.getElementById('inputSummary').innerHTML =
+        `<span>Rows loaded: ${body.querySelectorAll('tr').length}</span>
+         <span>Total shares: ${totalShares.toLocaleString()}</span>
+         <span>Total requested: ${totalReq.toLocaleString()}</span>`;
+    };
+
+    reader.readAsArrayBuffer(file);
+  }
+
+  // ========== Allocation logic ==========
+  function allocate(rightsTotal, holders) {
+    const n = holders.length;
+    const totalShares = holders.reduce((s, h) => s + h.shares, 0);
+
+    const ratios = holders.map(h => h.shares / totalShares);
+    const limits = ratios.map(r => Math.floor(rightsTotal * r));
+    const alloc = holders.map((h, i) => Math.min(h.request, limits[i]));
+
+    let remaining = rightsTotal - alloc.reduce((s, a) => s + a, 0);
+
+    // Re-share remaining among under-fulfilled requests by ratio
+    while (remaining > 0) {
+      const active = [];
+      for (let i = 0; i < n; i++) {
+        if (alloc[i] < holders[i].request) active.push(i);
+      }
+      if (active.length === 0) break;
+
+      const totalActiveShares = active.reduce((s, idx) => s + holders[idx].shares, 0);
+      const extrasIdeal = active.map(idx => remaining * holders[idx].shares / totalActiveShares);
+
+      const extrasInt = active.map((idx, k) => {
+        const cap = holders[idx].request - alloc[idx];
+        return Math.min(Math.floor(extrasIdeal[k]), cap);
+      });
+
+      let added = extrasInt.reduce((s, v) => s + v, 0);
+
+      if (added === 0) {
+        // Largest remainders method, 1 by 1
+        const remainders = extrasIdeal.map((x, k) => x - Math.floor(x));
+        const order = remainders
+          .map((r, k) => ({k, r}))
+          .sort((a, b) => b.r - a.r);
+
+        for (const {k} of order) {
+          if (remaining === 0) break;
+          const idx = active[k];
+          const cap = holders[idx].request - alloc[idx];
+          if (cap > 0) {
+            alloc[idx] += 1;
+            remaining -= 1;
+          }
+        }
+        break;
+      } else {
+        active.forEach((idx, k) => {
+          alloc[idx] += extrasInt[k];
+        });
+        remaining -= added;
+      }
+    }
+
+    return { ratios, limits, alloc, remaining, totalShares };
+  }
+
+  function calculate() {
+    const rightsTotal = Number(document.getElementById('rightsTotal').value || 0);
+    if (!rightsTotal) {
+      alert('Enter total Right Issue shares.');
+      return;
+    }
+
+    const body = document.getElementById('holder-rows');
+    const rows = Array.from(body.querySelectorAll('tr'));
+    if (rows.length === 0) {
+      alert('Load an Excel file first.');
+      return;
+    }
+
+    const holders = [];
+    rows.forEach((tr, index) => {
+      const tds = tr.querySelectorAll('td');
+      const ref = tds[1].textContent.trim();
+      const shares = Number(tds[2].textContent.replace(/,/g, '')) || 0;
+      const request = Number(tds[3].textContent.replace(/,/g, '')) || 0;
+      if (shares > 0 || request > 0) {
+        holders.push({
+          no: index + 1,
+          ref,
+          shares,
+          request
+        });
+      }
+    });
+
+    const { ratios, limits, alloc, remaining, totalShares } = allocate(rightsTotal, holders);
+
+    const resBody = document.getElementById('result-rows');
+    resBody.innerHTML = '';
+
+    let totReq = 0, totLimit = 0, totAlloc = 0;
+
+    holders.forEach((h, i) => {
+      const ratioPct = ratios[i] * 100;
+      const limit = limits[i];
+      const allocation = alloc[i];
+      const balanceReq = h.request - allocation;
+
+      totReq += h.request;
+      totLimit += limit;
+      totAlloc += allocation;
+
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td style="text-align:center;">${h.no}</td>
+        <td style="text-align:left;">${h.ref}</td>
+        <td>${h.shares.toLocaleString()}</td>
+        <td>${h.request.toLocaleString()}</td>
+        <td>${ratioPct.toFixed(2)}%</td>
+        <td>${limit.toLocaleString()}</td>
+        <td>${allocation.toLocaleString()}</td>
+        <td>${balanceReq.toLocaleString()}</td>
+      `;
+      resBody.appendChild(tr);
+    });
+
+    document.getElementById('totShares').textContent = totalShares.toLocaleString();
+    document.getElementById('totRequested').textContent = totReq.toLocaleString();
+    document.getElementById('totLimit').textContent = totLimit.toLocaleString();
+    document.getElementById('totAllocated').textContent = totAlloc.toLocaleString();
+
+    document.getElementById('outputSummary').innerHTML =
+      `<span>Rights total: ${rightsTotal.toLocaleString()}</span>
+       <span>Allocated: ${totAlloc.toLocaleString()}</span>
+       <span>Remaining (not allocated): ${remaining.toLocaleString()}</span>`;
+  }
+</script>
+<div class="card" style="text-align:center;font-size:13px;">
+    <div class="muted">
+        Built by <a href="https://vinuja.me" target="_blank" rel="noopener noreferrer">Vinuja Ransith</a>
+    </div>
+    <div class="muted" id="credit-year"></div>
+</div>
+<script>
+    document.getElementById('credit-year').textContent = '© ' + new Date().getFullYear() + ' Vinuja Ransith';
+</script>
+</body>
+</html>
+
